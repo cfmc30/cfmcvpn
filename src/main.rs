@@ -1,5 +1,6 @@
 mod client;
 mod server;
+mod control;
 extern crate tun;
 
 use clap::{Parser, Subcommand};

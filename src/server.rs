@@ -1,12 +1,20 @@
+
+use crate::control::{self, ClientMsg};
+
 use std::error::Error;
+use serde::Deserialize;
 use tokio::fs::File;
 use tokio::net::UdpSocket;
-use tun::r#async;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_native_tls::native_tls;
 use tokio_native_tls::native_tls::Identity;
+
+async fn control_even() {
+
+}
+
 
 pub async fn start_server(
     port: &u32,
@@ -28,32 +36,31 @@ pub async fn start_server(
     let cert = Identity::from_pkcs12(cert_cnt.as_slice(), "12345678")?;
     let tls_acceptor =
         tokio_native_tls::TlsAcceptor::from(native_tls::TlsAcceptor::builder(cert).build()?);
-
+    
     loop {
         let (socket, remote_addr) = control_channel.accept().await?;
         let tls_acceptor = tls_acceptor.clone();
-        println!("Accept connection from {}", remote_addr);
+        println!("Accept control connection from {}", remote_addr);
         tokio::spawn(async move {
             // Accept the TLS connection.
             let mut tls_stream = tls_acceptor.accept(socket).await.expect("accept error");
             // In a loop, read data from the socket and write the data back.
-
-            let mut buf = [0; 1024];
+            
+            let mut buf = Vec::new();
             let n = tls_stream
-                .read(&mut buf)
+                .read_to_end(&mut buf)
                 .await
                 .expect("failed to read data from socket");
-
+    
             if n == 0 {
+                // connection closed
                 return;
             }
-            println!("read={}", unsafe {
-                String::from_utf8_unchecked(buf[0..n].into())
-            });
-            tls_stream
-                .write_all(&buf[0..n])
-                .await
-                .expect("failed to write data to socket");
+            
+            let client_msg: ClientMsg = serde_json::from_slice(buf.as_slice()).unwrap();
+
+            println!("Recv Client Msg: {:?}", client_msg);
+            
         });
     }
     // let mut config = tun::Configuration::default();
