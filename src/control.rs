@@ -3,9 +3,9 @@ use serde::{Serialize, Deserialize};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum ClientAction {
-    RegUsr = 1,
-    Login = 2,
-    Disconnect = 3,
+    RegUsr,
+    Login,
+    Disconnect,
 }
 
 /// Message format from client
@@ -13,6 +13,19 @@ pub enum ClientAction {
 pub struct ClientMsg {
     pub action: ClientAction,
     pub user_name: String,
-    pub user_passwd: String,
+    pub user_passwd_hash: String,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub enum ServerAction {
+    Success = 1,
+    Fail = 2,
+}
+
+/// Message format from server
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ServerMsg {
+    pub action: ServerAction,
+    pub user_name: String,
+    pub user_passwd_hash: String,
+}

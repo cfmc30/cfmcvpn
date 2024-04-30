@@ -1,7 +1,7 @@
 mod client;
 mod server;
 mod control;
-extern crate tun;
+mod user;
 
 use clap::{Parser, Subcommand};
 use nix::{unistd::Uid};
@@ -33,9 +33,6 @@ enum Commands {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
-    if !Uid::effective().is_root() {
-        return Err(Box::from("Non root user."));
-    }
     match &cli.command {
         Commands::Client {
             endpoint,
