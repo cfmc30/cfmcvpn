@@ -1,10 +1,11 @@
 mod client;
 mod server;
 mod control;
-mod user;
+mod server_user_manager;
+mod user_manager;
 
 use clap::{Parser, Subcommand};
-use nix::{unistd::Uid};
+use nix::{libc::EM_COLDFIRE, unistd::Uid};
 use std::{error::Error, string::String};
 
 #[derive(Parser)]
@@ -16,16 +17,28 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start simple-vpn server
+    /// Start cfmcvpn server
     Server {
         port: u32,
         control_port: u32,
         cert_path: String,
     },
-    /// Start simple-vpn client
+    /// Start cfmcvpn client
     Client {
+        /// Server Hostname
         endpoint: String,
+        /// Server Data Port
         port: u32,
+        /// Server Control Port
+        control_port: u32,
+    },
+    /// Register a new user
+    Register{
+        /// Server Hostname
+        endpoint: String,
+        /// Server Data Port
+        port: u32,
+        /// Server Control Port
         control_port: u32,
     },
 }
@@ -40,6 +53,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             control_port,
         } => {
             client::start_client(endpoint, port, control_port).await?;
+        }
+        Commands::Register{
+            endpoint,
+            port,
+            control_port,
+        } => {
+            client::register_user(endpoint, port, control_port).await?;
         }
         Commands::Server {
             port,

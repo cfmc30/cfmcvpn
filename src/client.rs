@@ -1,64 +1,74 @@
 use crate::control::*;
+use crate::{user_manager::Client, Cli};
+use log::{error, info, warn};
+use packet::ip;
+use std::io::Stdout;
 use std::{error::Error, net::ToSocketAddrs};
+use tokio::io::AsyncBufReadExt;
+use tokio::signal::ctrl_c;
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpStream, UdpSocket},
 };
 use tokio_native_tls::native_tls::TlsConnector;
 
+pub async fn get_user_info() -> Result<(String, String), Box<dyn Error>> {
+    let my_buf_read = tokio::io::BufReader::new(tokio::io::stdin());
+    let mut lines = my_buf_read.lines();
+
+    let mut stdout = tokio::io::stdout();
+    stdout.write_all(b"Please input your user name:").await?;
+    stdout.flush().await?;
+    let user_name = loop {
+        match lines.next_line().await {
+            Ok(Some(name)) => break name,
+            Ok(None) => {
+                continue;
+            }
+            Err(_e) => {
+                continue;
+            }
+        }
+    };
+    // get password
+    stdout.write_all(b"Please input your password:").await?;
+    stdout.flush().await?;
+    let passwd = match lines.next_line().await {
+        Ok(Some(passwd)) => passwd,
+        Ok(None) => {
+            return Err("No password provided".into());
+        }
+        Err(e) => {
+            return Err(e.into());
+        }
+    };
+    Ok((user_name, passwd))
+}
+
+pub async fn register_user(
+    remote_host: &String,
+    data_port: &u32,
+    ctl_port: &u32,
+) -> Result<(), Box<dyn Error>> {
+    // get user name
+    let (user_name, passwd) = get_user_info().await?;
+    let client = Client::new(&user_name, &passwd, remote_host, *data_port, *ctl_port);
+    client.register().await?;
+    Ok(())
+}
+
 pub async fn start_client(
     remote_host: &String,
-    port: &u32,
+    data_port: &u32,
     ctl_port: &u32,
 ) -> Result<(), Box<dyn Error>> {
     // open an virtual interface for VPN
-    let ctl_endpoint = format!("{}:{}", remote_host, ctl_port);
+    // input user name and password
+    // send register request to server
 
-    {
-        let ctl_stm = TcpStream::connect(&ctl_endpoint).await?;
-
-        let cx = TlsConnector::builder().build()?;
-        let cx = tokio_native_tls::TlsConnector::from(cx);
-
-        let mut ctl_stm = cx.connect(remote_host, ctl_stm).await?;
-
-        let client_msg = ClientMsg {
-            action: ClientAction::RegUsr,
-            user_name: "Van".to_string(),
-            user_passwd_hash: "Boy Next Door".to_string(),
-        };
-
-        let buf = serde_json::to_string(&client_msg).unwrap();
-
-        ctl_stm.write_all(buf.as_bytes()).await?;
-        ctl_stm.flush().await?;
-        println!("data send: {}", buf);
-    }
-
-    let data_endpoint = format!("{}:{}", remote_host, port);
-    println!("data_endpoint: {}", data_endpoint);
-    let remote_addr = data_endpoint.to_socket_addrs().unwrap().next().unwrap();
-    println!("remote_addr: {:?}", remote_addr);
-
-    let sock: UdpSocket = UdpSocket::bind("0.0.0.0:0").await?;
-    // sock.connect("140.113.123.156:8080".to_socket_addrs().unwrap().next().unwrap()).await?;
-
-    sock.send_to("Hello world!".as_bytes(), remote_addr).await?;
-    // sock.send("Hello world!".as_bytes()).await?;
-    println!("data send: Hello world!");
-    tokio::signal::ctrl_c().await?;
-
-    // let mut config = tun::Configuration::default();
-    // config
-    //     .address((10, 0, 0, 1))
-    //     .netmask((255, 255, 255, 0))
-    //     .up();
-
-    // #[cfg(target_os = "linux")]
-    // config.platform(|config| {
-    //     config.packet_information(true);
-    // });
-    // let mut dev = tun::create(&config).unwrap();
-    // let mut buf = [0; 4096];
+    // get user name
+    let (user_name, passwd) = get_user_info().await?;
+    let mut client = Client::new(&user_name, &passwd, remote_host, *data_port, *ctl_port);
+    client.start().await?;
     Ok(())
 }

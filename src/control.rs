@@ -27,5 +27,6 @@ pub enum ServerAction {
 pub struct ServerMsg {
     pub action: ServerAction,
     pub user_name: String,
-    pub user_passwd_hash: String,
+    pub user_ip: String,
+    pub message: String,
 }
