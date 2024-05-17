@@ -1,7 +1,7 @@
 use crate::client;
 use crate::control::{ClientAction, ClientMsg, ServerAction, ServerMsg};
 
-use nix::libc::{printf, sockaddr};
+use nix::libc::{printf, sockaddr, user};
 use packet::{ip, Packet};
 use std::error::Error;
 use std::num;
@@ -15,7 +15,7 @@ use std::net::Ipv4Addr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_native_tls::native_tls::Identity;
-use tokio_native_tls::{native_tls, TlsAcceptor, TlsStream};
+use tokio_native_tls::{native_tls, TlsAcceptor};
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -38,14 +38,19 @@ async fn tls_acceptor_creator(cert_path: &String) -> Result<TlsAcceptor, Box<dyn
 async fn send_msg(server_msg: &ServerMsg, tls_stream: &mut tokio_native_tls::TlsStream<TcpStream>) {
     let server_msg_str = serde_json::to_string(&server_msg).unwrap();
     match tls_stream.write(server_msg_str.as_bytes()).await {
-        Ok(_) => {
-            println!("Send server msg: {:?}", server_msg);
+        Ok(_) => {}
+        Err(e) => {
+            warn!("Write error: {:?}", e);
         }
-        Err(err) => {
-            println!("Send server msg error: {:?}", err);
-        }
+    
     };
-    tls_stream.flush().await.unwrap();
+    match tls_stream.flush().await {
+        Ok(_) => {}
+        Err(e) => {
+            warn!("Flush error: {:?}", e);
+        }
+    
+    };
 }
 
 async fn user_management_loop(
@@ -100,10 +105,11 @@ async fn user_management_loop(
                             &client_msg.user_passwd_hash,
                             &remote_addr,
                         ) {
-                            Ok(user) => {
-                                println!("User Register Success: {:?}", user);
+                            Ok(uid) => {
+                                println!("User Register Success: uid={:?}", uid);
                                 send_msg(&ServerMsg {
                                     action: ServerAction::Success,
+                                    uid: uid,
                                     user_name: client_msg.user_name,
                                     user_ip: "".to_string(),
                                     message: "Register Success".to_string(),
@@ -122,6 +128,7 @@ async fn user_management_loop(
                                 println!("{}", error_msg);
                                 send_msg(&ServerMsg {
                                     action: ServerAction::Fail,
+                                    uid: 0,
                                     user_name: client_msg.user_name,
                                     user_ip: "".to_string(),
                                     message: error_msg,
@@ -131,15 +138,16 @@ async fn user_management_loop(
                     }
                     ClientAction::Login => {
                         if let Some(user) = user_db.get_user_by_name(&client_msg.user_name) {
+                            let user = user.clone();
                             if user.passwd_hash == client_msg.user_passwd_hash {
                                 println!("User Login Success: {:?}", user);
                                 // assign user a ip
                                 let user_ip = user_db.assign_user_ip(&client_msg.user_name);
                                 match user_ip {
                                     Ok(ip) => {
-                                        
                                         send_msg(&ServerMsg {
                                             action: ServerAction::Success,
+                                            uid: user.uid,
                                             user_name: client_msg.user_name,
                                             user_ip: ip.to_string(),
                                             message: "Login Success".to_string(),
@@ -149,6 +157,7 @@ async fn user_management_loop(
                                         println!("User Login Fail: {}", err);
                                         send_msg(&ServerMsg {
                                             action: ServerAction::Fail,
+                                            uid: 0,
                                             user_name: client_msg.user_name,
                                             user_ip: "".to_string(),
                                             message: "No ip".to_string(),
@@ -158,7 +167,8 @@ async fn user_management_loop(
                             } else {
                                 println!("User Login Fail: {:?} password wrong", user);
                                 send_msg(&ServerMsg {
-                                    action: ServerAction::Success,
+                                    action: ServerAction::Fail,
+                                    uid: 0,
                                     user_name: client_msg.user_name,
                                     user_ip: "".to_string(),
                                     message: "Password wrong".to_string(),
@@ -167,7 +177,8 @@ async fn user_management_loop(
                         } else {
                             println!("User Login Fail: User {} not found", client_msg.user_name);
                             send_msg(&ServerMsg {
-                                action: ServerAction::Success,
+                                action: ServerAction::Fail,
+                                uid: 0,
                                 user_name: client_msg.user_name,
                                 user_ip: "".to_string(),
                                 message: "User not found".to_string(),
@@ -204,7 +215,7 @@ pub async fn start_server(
             .try_build()
             .unwrap(),
     );
-    println!("Tun created: {:?}", tun.name());
+    info!("Tun created: cfmcvpn");
 
     let data_addr = format!("0.0.0.0:{}", port);
     let data_sock = Arc::new(UdpSocket::bind(&data_addr).await?);
@@ -214,10 +225,11 @@ pub async fn start_server(
 
     let _data_sock = data_sock.clone();
     let _user_db = user_db.clone();
+    let _tun = tun.clone();
     tokio::spawn(async move {
         loop {
             let mut buf = [0u8; 2048];
-            let n = match tun.recv(&mut buf).await {
+            let n = match _tun.recv(&mut buf).await {
                 Ok(n) => n,
                 Err(e) => {
                     error!("Forward loop: tun recv error: {:?}", e);
@@ -227,12 +239,13 @@ pub async fn start_server(
             // Check if the packet is ipv4
             match ip::v4::Packet::new(&buf[..n]) {
                 Ok(packet) => {
-                    println!("Recv ipv4 packet from tun: {:?}", packet);
-                    let dst_ip = packet.destination();
+                    println!("Recv ipv4 packet from tun: src: {:?}, dst: {:?}",
+                             packet.source(), packet.destination());
+                    let vpn_dst_ip = packet.destination();
                     let mut user_db = _user_db.lock().await;
-                    if let Some(user) = user_db.get_user_by_ip(&dst_ip) {
+                    if let Some(user) = user_db.get_user_by_ip(&vpn_dst_ip) {
                         println!("User found: {:?}", user);
-                        let sent_res = _data_sock.send_to(&buf, user.remote_ip).await;
+                        let sent_res = _data_sock.send_to(&buf[..n], user.remote_ip).await;
                         match sent_res {
                             Ok(n) => {
                                 println!("Forward loop: Sent {} bytes to {}", n, user.remote_ip);
@@ -242,7 +255,7 @@ pub async fn start_server(
                             }
                         }
                     } else {
-                        error!("Forward loop: user not found for dst ip: {:?}", dst_ip);
+                        error!("Forward loop: user not found for dst ip: {:?}", vpn_dst_ip);
                     }
                 }
                 Err(err) => {
@@ -253,7 +266,8 @@ pub async fn start_server(
     });
 
     let _data_sock = data_sock.clone();
-
+    let _user_db = user_db.clone();
+    let _tun = tun.clone();
     tokio::spawn(async move {
         let data_sock = _data_sock.clone();
         loop {
@@ -262,8 +276,29 @@ pub async fn start_server(
                 .await
                 .expect("failed to receive from socket");
             println!("Recv {} bytes from {}", n, src);
-            println!("Recv data from socket: {:?}", &buf[..n]);
-            // decode data as string
+            let uid = buf[0];
+            let vpn_dst = Ipv4Addr::new(buf[1], buf[2], buf[3], buf[4]);
+            let mut user_db = _user_db.lock().await;
+            println!("unlock user_db");
+            if let Some(user) = user_db.get_user_by_uid(&uid) {
+                println!("User found: {:?}", user);
+                user.remote_ip = src.clone();
+                if vpn_dst == Ipv4Addr::new(10, 0, 0, 1) {
+                    let sent_res = _tun.send_all(&buf[5..n]).await;
+                    match sent_res {
+                        Ok(()) => {
+                            println!("Sent {} bytes to tun", n - 5);
+                        }
+                        Err(err) => {
+                            println!("Send error: {:?}", err);
+                        }
+                    }
+                } else {
+                    unimplemented!("Forward to internet")
+                }
+            } else {
+                println!("User not found for uid: {}", uid);
+            }
         }
     });
 

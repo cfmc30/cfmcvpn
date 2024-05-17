@@ -11,6 +11,7 @@ use std::sync::Mutex;
 #[derive(Clone, Debug)]
 pub struct User {
     pub name: String,
+    pub uid: u8,
     pub passwd_hash: String,
     pub vpn_ip: Option<Ipv4Addr>,
     pub remote_ip: SocketAddr,
@@ -32,8 +33,9 @@ impl User {
 }
 
 pub struct UserList {
-    users: HashMap<Ipv4Addr, User>,
+    users: HashMap<u8, User>,
     unused_ip: HashSet<Ipv4Addr>,
+    unused_uid: HashSet<u8>,
 }
 
 pub enum UserRegErr {
@@ -56,12 +58,15 @@ impl std::fmt::Display for UserRegErr {
 impl UserList {
     pub fn new() -> UserList {
         let mut unused_ip = HashSet::new();
+        let mut unused_uid = HashSet::new();
         for i in 2..254 {
             unused_ip.insert(Ipv4Addr::new(10, 0, 0, i));
+            unused_uid.insert(i);
         }
         UserList {
             users: HashMap::new(),
             unused_ip,
+            unused_uid,
         }
     }
 
@@ -91,31 +96,54 @@ impl UserList {
         }
     }
 
-    pub fn reg_user(&mut self, name: &String, passwd_hash: &String, remote_ip: &SocketAddr) -> Result<(), UserRegErr> {
+    pub fn reg_user(&mut self, name: &String, passwd_hash: &String, remote_ip: &SocketAddr) -> Result<u8, UserRegErr> {
         if self.users.values().any(|user| user.name == *name) {
             return Err(UserRegErr::UnavailableUserName);
         }
 
         let new_user = User {
             name: name.clone(),
+            uid: self.unused_uid.iter().next().unwrap().clone(),
             passwd_hash: passwd_hash.clone(),
             vpn_ip: None,
             remote_ip: remote_ip.clone(),
             key: Vec::new(),
         };
+        self.unused_uid.remove(&new_user.uid);
 
         let remote_ipv4 = match remote_ip.ip() {
             std::net::IpAddr::V4(ipv4) => ipv4,
             _ => return Err(UserRegErr::Error("Remote ip is not ipv4".to_string())),
         };
-
-        self.users.insert(remote_ipv4, new_user);
-        Ok(())
+        let uid = new_user.uid.clone();
+        self.users.insert(new_user.uid.clone(), new_user);
+        Ok(uid)
     }
 
     pub fn get_user_by_name(&mut self, name: &String) -> Option<&mut User> {
         let user = self.users.iter_mut().find(|user| {
             user.1.name == *name
+        });
+        match user {
+            None => {
+                return None;
+            },
+            Some(user) => {
+                return Some(user.1);
+            },
+        }
+    }
+
+    pub fn get_user_by_ip(&mut self, ip: &Ipv4Addr) -> Option<&mut User> {
+        let user = self.users.iter_mut().find(|user| {
+            match user.1.vpn_ip {
+                Some(vpn_ip) => {
+                    vpn_ip == *ip
+                },
+                None => {
+                    false
+                },
+            }
         });
         match user {
             None => {
@@ -168,8 +196,8 @@ impl UserList {
         // Ok(())
     }
 
-    pub fn get_user_by_ip(&mut self, ip: &Ipv4Addr) -> Option<&mut User> {
-        match self.users.get_mut(ip) {
+    pub fn get_user_by_uid(&mut self, uid: &u8) -> Option<&mut User> {
+        match self.users.get_mut(uid) {
             None => {
                 None
             },

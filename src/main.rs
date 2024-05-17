@@ -3,10 +3,16 @@ mod server;
 mod control;
 mod server_user_manager;
 mod user_manager;
+mod tunnel;
 
 use clap::{Parser, Subcommand};
 use nix::{libc::EM_COLDFIRE, unistd::Uid};
 use std::{error::Error, string::String};
+
+extern crate pretty_env_logger;
+#[macro_use] extern crate log;
+
+use log::{info, warn, error};
 
 #[derive(Parser)]
 #[command(long_about = None)]
@@ -46,6 +52,7 @@ enum Commands {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
+    pretty_env_logger::init();
     match &cli.command {
         Commands::Client {
             endpoint,

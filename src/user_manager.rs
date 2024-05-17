@@ -1,4 +1,5 @@
 use log::{debug, error, info, warn};
+use nix::libc::socket;
 use std::{
     error::Error,
     net::{Ipv4Addr, ToSocketAddrs},
@@ -24,6 +25,7 @@ use tokio::{
 pub struct Client {
     user_name: String,
     passwd_hash: String,
+    uid: u8,
     vpn_ip: Ipv4Addr,
     udp_socket: Option<Arc<UdpSocket>>,
     tun: Option<Arc<Tun>>,
@@ -67,6 +69,7 @@ impl Client {
     async fn create_udp_socket(&mut self) -> Result<(), Box<dyn Error>> {
         // port?
         let udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
+        udp_socket.connect(format!("{}:{}", self.server_ip.to_string(), self.data_port)).await?;
         // assign udp socket to self.udp_socket
         self.udp_socket = Some(Arc::new(udp_socket));
         Ok(())
@@ -92,6 +95,7 @@ impl Client {
         };
         Self {
             user_name: user_name.clone(),
+            uid: 0,
             passwd_hash: passwd_hash.clone(),
             server_domain: server_domain.clone(),
             ctl_port,
@@ -114,9 +118,15 @@ impl Client {
         println!("User Login as: {}", self.user_name);
         let mut ctl_stm = self.tls_stream_creator().await?;
         let server_msg = self.send_msg(&mut ctl_stm, &client_msg).await?;
-
+        match server_msg.action {
+            ServerAction::Fail => {
+                return Err(server_msg.message.into());
+            }
+            ServerAction::Success => {}
+        }
         self.vpn_ip = server_msg.user_ip.parse().unwrap();
-        println!("User Login Success, VPN IP: {}", self.vpn_ip);
+        self.uid = server_msg.uid;
+        println!("User Login Success, VPN IP: {}, uid: {}", self.vpn_ip, self.uid);
         Ok(())
     }
 
@@ -146,7 +156,6 @@ impl Client {
         self.login().await?;
         self.create_udp_socket().await?;
 
-        
         let tun: Arc<Tun> = Arc::new(
             Tun::builder()
                 .name("cfmcclient")
@@ -165,19 +174,26 @@ impl Client {
 
         let _tun = tun.clone();
 
+        // vpn to tun
         let sock = self.udp_socket.as_ref().unwrap().clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 2048];
             loop {
                 // receive udp packet and decode as ip packet
-                let (n, src) = sock.recv_from(&mut buf).await.unwrap();
+                let (n) = sock.recv(&mut buf).await.unwrap();
+                println!("Recv udp packet from server: size = {}", n);
                 _tun.send_all(&buf[..n]).await.unwrap();
             }
         });
 
+        // tun to vpn
+        let server_ip = self.server_ip.clone();
+        let data_port = self.data_port.clone();
+        let udp_socket = self.udp_socket.as_ref().unwrap().clone();
+        let uid = self.uid.clone();
         tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
             loop {
-                let mut buf = [0u8; 2048];
                 let n = match tun.recv(&mut buf).await {
                     Ok(n) => n,
                     Err(err) => {
@@ -187,13 +203,24 @@ impl Client {
                 };
                 match ip::v4::Packet::new(&buf[..n]) {
                     Ok(packet) => {
-                        info!("Recv ipv4 packet from tun: {:?}", packet);
+                        println!("Recv ipv4 packet from tun: src = {:?}, dst = {:?}", packet.source(), packet.destination());
+                        let src = packet.source();
+                        let dst = packet.destination();
+
+                        if (Ipv4Addr::new(10, 0, 0, 0)..=Ipv4Addr::new(10, 0, 0, 255))
+                            .contains(&dst)
+                        {
+                            let mut payload = Vec::new();
+                            payload.extend_from_slice(uid.to_be_bytes().as_ref());
+                            payload.extend_from_slice(&dst.octets());
+                            payload.extend_from_slice(&buf[..n]);
+                            udp_socket.send_to(&payload, format!("{}:{}", server_ip, data_port)).await.unwrap();
+                        }
                     }
                     Err(err) => {
                         error!("Error: {:?}", err);
                     }
                 }
-                // send the packet to server
             }
         });
         ctrl_c().await.unwrap();
