@@ -1,33 +1,36 @@
-use log::{debug, error, info, warn};
-use nix::libc::socket;
 use std::{
     error::Error,
     net::{Ipv4Addr, ToSocketAddrs},
 };
 use tokio_native_tls::native_tls::TlsConnector;
 use tokio_native_tls::TlsStream;
-use tokio_util::bytes::buf;
-
-use std::future;
 
 use packet::ip;
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use tokio::{io::join, signal::ctrl_c};
+use tokio::signal::ctrl_c;
 use tokio_tun::Tun;
 
-use crate::{control::*, server};
+use crate::control::*;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpStream, UdpSocket},
 };
 
+use aes_gcm::{
+    aead::{Aead, AeadCore, KeyInit, OsRng},
+    Aes256Gcm, Nonce, Key // Or `Aes128Gcm`
+};
+
+
+use log::{error, info, warn};
+
 pub struct Client {
     user_name: String,
-    passwd_hash: String,
+    password: String,
     uid: u8,
     vpn_ip: Ipv4Addr,
     udp_socket: Option<Arc<UdpSocket>>,
+    aes_key: Vec<u8>,
     tun: Option<Arc<Tun>>,
     server_ip: Ipv4Addr,
     server_domain: String,
@@ -43,18 +46,18 @@ impl Client {
         msg: &ClientMsg,
     ) -> Result<ServerMsg, Box<dyn Error>> {
         let buf = serde_json::to_string(&msg).unwrap();
-        println!("Sending msg: {}", buf);
+        // println!("Sending msg: {}", buf);
         ctl_stm.write_all(buf.as_bytes()).await?;
         ctl_stm.flush().await?;
         let mut buf = [0u8; 2048];
         let n: usize = ctl_stm.read(&mut buf).await.unwrap();
         let server_msg: ServerMsg = serde_json::from_slice(&buf[..n]).unwrap();
-        println!("Received msg: {:?}", server_msg);
+        // println!("Received msg: {:?}", server_msg);
         Ok(server_msg)
     }
 
     async fn tls_stream_creator(&self) -> Result<TlsStream<TcpStream>, Box<dyn Error>> {
-        println!(
+        info!(
             "Connecting to server: {}:{}",
             self.server_domain, self.ctl_port
         );
@@ -96,7 +99,7 @@ impl Client {
         Self {
             user_name: user_name.clone(),
             uid: 0,
-            passwd_hash: passwd_hash.clone(),
+            password: passwd_hash.clone(),
             server_domain: server_domain.clone(),
             ctl_port,
             data_port,
@@ -104,18 +107,18 @@ impl Client {
             tun: None,
             vpn_ip: Ipv4Addr::new(0, 0, 0, 0),
             server_ip: server_ip,
+            aes_key: Vec::new(),
         }
     }
 
     pub async fn login(&mut self) -> Result<(), Box<dyn Error>> {
-        println!("User Login");
         let client_msg = ClientMsg {
             action: ClientAction::Login,
-            user_name: self.user_name.clone(),
-            user_passwd_hash: self.passwd_hash.clone(),
+            username: self.user_name.clone(),
+            password: self.password.clone(),
         };
 
-        println!("User Login as: {}", self.user_name);
+        info!("User Login as: {}", self.user_name);
         let mut ctl_stm = self.tls_stream_creator().await?;
         let server_msg = self.send_msg(&mut ctl_stm, &client_msg).await?;
         match server_msg.action {
@@ -126,27 +129,27 @@ impl Client {
         }
         self.vpn_ip = server_msg.user_ip.parse().unwrap();
         self.uid = server_msg.uid;
-        println!("User Login Success, VPN IP: {}, uid: {}", self.vpn_ip, self.uid);
+        self.aes_key = server_msg.key;
+        info!("User Login Success, VPN IP: {}, uid: {}", self.vpn_ip, self.uid);
         Ok(())
     }
 
     pub async fn register(&self) -> Result<(), Box<dyn Error>> {
         let client_msg = ClientMsg {
             action: ClientAction::RegUsr,
-            user_name: self.user_name.clone(),
-            user_passwd_hash: self.passwd_hash.clone(),
+            username: self.user_name.clone(),
+            password: self.password.clone(),
         };
         let mut ctl_stm = self.tls_stream_creator().await?;
 
-        println!("User Register as: {}", self.user_name);
         let server_msg = self.send_msg(&mut ctl_stm, &client_msg).await?;
         match server_msg.action {
             ServerAction::Success => {
-                println!("User Register Success");
+                info!("User Register Success");
                 Ok(())
             }
             ServerAction::Fail => {
-                println!("{}", server_msg.message);
+                error!("{}", server_msg.message);
                 Err(server_msg.message.into())
             }
         }
@@ -170,7 +173,7 @@ impl Client {
                 .try_build()
                 .unwrap(),
         );
-        println!("Tun created: {:?}", tun.name());
+        info!("Tun created: {:?}", tun.name());
 
         let _tun = tun.clone();
 
@@ -180,8 +183,8 @@ impl Client {
             let mut buf = [0u8; 2048];
             loop {
                 // receive udp packet and decode as ip packet
-                let (n) = sock.recv(&mut buf).await.unwrap();
-                println!("Recv udp packet from server: size = {}", n);
+                let n = sock.recv(&mut buf).await.unwrap();
+                // println!("Recv udp packet from server: size = {}", n);
                 _tun.send_all(&buf[..n]).await.unwrap();
             }
         });
@@ -191,34 +194,40 @@ impl Client {
         let data_port = self.data_port.clone();
         let udp_socket = self.udp_socket.as_ref().unwrap().clone();
         let uid = self.uid.clone();
+        let aes_key = self.aes_key.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 2048];
             loop {
                 let n = match tun.recv(&mut buf).await {
                     Ok(n) => n,
                     Err(err) => {
-                        error!("Tun read error: {:?}", err);
+                        error!("{:?}", err);
                         continue;
                     }
                 };
                 match ip::v4::Packet::new(&buf[..n]) {
                     Ok(packet) => {
-                        println!("Recv ipv4 packet from tun: src = {:?}, dst = {:?}", packet.source(), packet.destination());
-                        let src = packet.source();
+                        // println!("Recv ipv4 packet from tun: src = {:?}, dst = {:?}", packet.source(), packet.destination());
                         let dst = packet.destination();
 
                         if (Ipv4Addr::new(10, 0, 0, 0)..=Ipv4Addr::new(10, 0, 0, 255))
                             .contains(&dst)
                         {
                             let mut payload = Vec::new();
+                            let plaintext = &buf[..n];
+                            let key = Key::<Aes256Gcm>::from_slice(&aes_key);
+                            let cipher = Aes256Gcm::new(key);
+                            let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+                            let encrypted = cipher.encrypt(&nonce, plaintext).unwrap();
                             payload.extend_from_slice(uid.to_be_bytes().as_ref());
                             payload.extend_from_slice(&dst.octets());
-                            payload.extend_from_slice(&buf[..n]);
+                            payload.extend_from_slice(nonce.as_ref());
+                            payload.extend_from_slice(&encrypted);
                             udp_socket.send_to(&payload, format!("{}:{}", server_ip, data_port)).await.unwrap();
                         }
                     }
                     Err(err) => {
-                        error!("Error: {:?}", err);
+                        error!("{:?}", err);
                     }
                 }
             }
@@ -227,3 +236,4 @@ impl Client {
         Ok(())
     }
 }
+    

@@ -1,23 +1,14 @@
-use crate::control::*;
-use crate::{user_manager::Client, Cli};
-use log::{error, info, warn};
-use packet::ip;
-use std::io::Stdout;
-use std::{error::Error, net::ToSocketAddrs};
+use crate::user_manager::Client;
+use std::error::Error;
 use tokio::io::AsyncBufReadExt;
-use tokio::signal::ctrl_c;
-use tokio::{
-    io::AsyncWriteExt,
-    net::{TcpStream, UdpSocket},
-};
-use tokio_native_tls::native_tls::TlsConnector;
+use tokio::io::AsyncWriteExt;
 
 pub async fn get_user_info() -> Result<(String, String), Box<dyn Error>> {
     let my_buf_read = tokio::io::BufReader::new(tokio::io::stdin());
     let mut lines = my_buf_read.lines();
 
     let mut stdout = tokio::io::stdout();
-    stdout.write_all(b"Please input your user name:").await?;
+    stdout.write_all(b"Login: ").await?;
     stdout.flush().await?;
     let user_name = loop {
         match lines.next_line().await {
@@ -31,7 +22,7 @@ pub async fn get_user_info() -> Result<(String, String), Box<dyn Error>> {
         }
     };
     // get password
-    stdout.write_all(b"Please input your password:").await?;
+    stdout.write_all(b"Password: ").await?;
     stdout.flush().await?;
     let passwd = match lines.next_line().await {
         Ok(Some(passwd)) => passwd,
@@ -42,6 +33,7 @@ pub async fn get_user_info() -> Result<(String, String), Box<dyn Error>> {
             return Err(e.into());
         }
     };
+
     Ok((user_name, passwd))
 }
 

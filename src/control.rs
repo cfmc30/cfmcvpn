@@ -12,8 +12,8 @@ pub enum ClientAction {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ClientMsg {
     pub action: ClientAction,
-    pub user_name: String,
-    pub user_passwd_hash: String,
+    pub username: String,
+    pub password: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -30,4 +30,5 @@ pub struct ServerMsg {
     pub uid: u8,
     pub user_ip: String,
     pub message: String,
+    pub key: Vec<u8>,
 }
