@@ -1,4 +1,9 @@
 * cfmcvpn: A simple VPN implenmented in rust.
 
-You can check usage by src_sh[:exports code]{sudo ./simple_vpn --help}.
+You can check usage by
+
+#+begin_src sh :eval never-export
+sudo ./simple_vpn --help
+#+end_src
+
 Now certificate only support pfx format and encrypted using passphrase 12345678.
